@@ -1,0 +1,25 @@
+<?php
+namespace App\Http\Controllers\Api;
+use App\Http\Controllers\Controller;
+use App\Models\Task;
+use App\Models\Project;
+use App\Models\FocusSession;
+use App\Support\WorkspaceScope as Scope;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+class TaskController extends Controller {
+ private function rules(): array {return ['title'=>'sometimes|required|string|max:200','description'=>'nullable|string|max:5000','project_id'=>'nullable|integer','status'=>['sometimes',Rule::in(['todo','progress','done'])],'priority'=>['sometimes',Rule::in(['low','medium','high','urgent'])],'due_at'=>'nullable|date','estimate_minutes'=>'nullable|integer|min:1|max:100000','position'=>'sometimes|integer|min:0|max:1000000'];}
+ private function projectAllowed(Request $request,array $data): void {if(!array_key_exists('project_id',$data)||$data['project_id']===null)return;$p=Project::findOrFail($data['project_id']);Scope::resource($request,$p);}
+ public function index(Request $request){$input=$request->validate(['status'=>Rule::in(['todo','progress','done']),'project_id'=>'integer|min:1','search'=>'string|max:120','limit'=>'integer|min:1|max:100','page'=>'integer|min:1']);$q=Task::query()->with(['project:id,name,color','subtasks:id,task_id,title,is_done']);Scope::filter($q,$request);
+  if(isset($input['status']))$q->where('status',$input['status']);if(isset($input['project_id']))$q->where('project_id',$input['project_id']);if(!empty($input['search']))$q->where('title','like','%'.addcslashes($input['search'],'%_\\').'%');return $q->orderBy('position')->orderByDesc('id')->paginate($input['limit']??100);}
+ public function store(Request $request){$space=Scope::current($request,true);$data=$request->validate(array_merge($this->rules(),['title'=>'required|string|max:200']));$this->projectAllowed($request,$data);$task=Task::create($data+['user_id'=>$request->user()->id,'workspace_id'=>$space?->id]);if($task->status==='done')$task->forceFill(['completed_at'=>now()])->save();return response()->json($task->load(['project','subtasks']),201);}
+ public function update(Request $request,Task $task){Scope::resource($request,$task,true);$data=$request->validate($this->rules());$this->projectAllowed($request,$data);if(array_key_exists('status',$data)&&$data['status']!==$task->status)$data['completed_at']=$data['status']==='done'?now():null;$task->update($data);return $task->load(['project','subtasks']);}
+ public function destroy(Request $request,Task $task){Scope::resource($request,$task,true);$task->delete();return response()->noContent();}
+ public function focusStart(Request $request,Task $task){Scope::resource($request,$task,true);abort_if(FocusSession::where('user_id',$request->user()->id)->whereNull('ended_at')->where('started_at','>',now()->subHours(4))->exists(),409,'Une session est déjà en cours.');$f=FocusSession::create(['task_id'=>$task->id,'user_id'=>$request->user()->id,'started_at'=>now()]);return response()->json(['id'=>$f->id,'started_at'=>$f->started_at],201);}
+ public function focusFinish(Request $request,Task $task,FocusSession $session){Scope::resource($request,$task,true);abort_unless($session->task_id===$task->id && $session->user_id===$request->user()->id,404);abort_if($session->ended_at,409,'Session déjà terminée');return DB::transaction(function()use($session,$task){$s=FocusSession::whereKey($session->id)->lockForUpdate()->firstOrFail();abort_if($s->ended_at,409);$minutes=min(180,(int)floor($s->started_at->diffInSeconds(now())/60));abort_if($minutes<1,422,'Session trop courte');$s->update(['ended_at'=>now(),'credited_minutes'=>$minutes]);$task->increment('focus_minutes',$minutes);return response()->json(['credited_minutes'=>$minutes]);});}
+ public function addSubtask(Request $request,Task $task){Scope::resource($request,$task,true);$data=$request->validate(['title'=>'required|string|max:200']);return response()->json($task->subtasks()->create($data),201);}
+ public function updateSubtask(Request $request,Task $task,int $subtask){Scope::resource($request,$task,true);$item=$task->subtasks()->findOrFail($subtask);$item->update($request->validate(['title'=>'sometimes|required|string|max:200','is_done'=>'sometimes|boolean']));return $item;}
+ public function deleteSubtask(Request $request,Task $task,int $subtask){Scope::resource($request,$task,true);$task->subtasks()->findOrFail($subtask)->delete();return response()->noContent();}
+ public function stats(Request $request){$q=Task::query();Scope::filter($q,$request);$counts=(clone $q)->selectRaw('status, COUNT(*) as total')->groupBy('status')->pluck('total','status');return response()->json(['total'=>(clone $q)->count(),'todo'=>(int)($counts['todo']??0),'progress'=>(int)($counts['progress']??0),'done'=>(int)($counts['done']??0),'overdue'=>(clone $q)->where('status','!=','done')->where('due_at','<',now())->count(),'focus_minutes'=>(int)(clone $q)->sum('focus_minutes'),'completed_week'=>(clone $q)->where('completed_at','>=',now()->subDays(7))->count()]);}
+}

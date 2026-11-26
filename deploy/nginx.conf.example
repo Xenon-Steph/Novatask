@@ -1,0 +1,32 @@
+# Extrait de configuration Nginx pour un domaine unique : application React + API Laravel.
+# Adapter le domaine, les chemins et le socket PHP-FPM. Terminer HTTPS avec Certbot ou l'infrastructure.
+server {
+    listen 80;
+    server_name tasks.example.com;
+    root /srv/novatask/frontend/dist;
+    index index.html;
+    client_max_body_size 2m;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options DENY always;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+    # Les routes d'authentification, Sanctum et l'API utilisent Laravel
+    location ~ ^/(api|sanctum|login|register|logout)(/|$) {
+        root /srv/novatask/backend/public;
+        try_files $uri /index.php?$query_string;
+    }
+    location = /index.php {
+        root /srv/novatask/backend/public;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /srv/novatask/backend/public/index.php;
+        fastcgi_param DOCUMENT_ROOT /srv/novatask/backend/public;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+        internal;
+    }
+    location ~ /\. { deny all; }
+    location ~ \.php$ { return 404; }
+}
